@@ -13,10 +13,13 @@ Tiện ích Windows 11 nhỏ gọn để giữ từng cửa sổ là một icon 
 
 Windows nhóm các cửa sổ theo `System.AppUserModel.ID`. App đặt một ID riêng cho từng cửa sổ top-level đủ điều kiện thông qua `SHGetPropertyStoreForWindow`, sau đó đặt chế độ Taskbar sang `Always, hide labels` bằng hai giá trị HKCU `TaskbarGlomLevel` và `MMTaskbarGlomLevel`.
 
+Khi khởi động, app quét một lần các cửa sổ đang mở. Sau đó app dùng `SetWinEventHook` của Windows để nhận sự kiện cửa sổ mới được tạo, được hiển thị hoặc bị đóng. App không chạy timer quét lặp, vì vậy khi không có thay đổi cửa sổ thì gần như không sử dụng CPU.
+
 Tài liệu Windows liên quan:
 
 - [Application User Model IDs](https://learn.microsoft.com/en-us/windows/win32/shell/appids)
 - [SHGetPropertyStoreForWindow](https://learn.microsoft.com/en-us/windows/win32/api/shobjidl_core/nf-shobjidl_core-shgetpropertystoreforwindow)
+- [SetWinEventHook](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setwineventhook)
 - [Windows 11 Taskbar combine buttons setting](https://learn.microsoft.com/en-us/windows/apps/develop/settings/settings-windows-11#personalization---taskbar---combine-buttons)
 
 Đây là thay đổi trong phạm vi tài khoản người dùng hiện tại. App không cần quyền Administrator, không inject DLL vào Explorer và không sửa file hệ thống. Khi bấm `Khôi phục` hoặc `Thoát hẳn`, AppUserModelID của từng cửa sổ và hai giá trị Taskbar được trả về trạng thái trước đó.

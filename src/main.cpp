@@ -27,7 +27,7 @@ constexpr wchar_t kStateFileName[] = L"state.ini";
 constexpr UINT WM_TRAYICON = WM_APP + 1;
 constexpr UINT WM_SHOW_MAIN = WM_APP + 2;
 constexpr UINT WM_RESTORE_REQUEST = WM_APP + 3;
-constexpr UINT TIMER_SCAN = 1;
+constexpr UINT WM_WINDOW_EVENT = WM_APP + 4;
 
 constexpr int IDC_STATUS = 1001;
 constexpr int IDC_DETAILS = 1002;
@@ -67,6 +67,9 @@ struct WindowState {
     DWORD processId = 0;
     std::wstring processName;
 };
+
+class TaskbarController;
+TaskbarController* g_activeController = nullptr;
 
 std::wstring ToLower(std::wstring value) {
     std::transform(value.begin(), value.end(), value.begin(),
@@ -402,6 +405,7 @@ public:
     explicit TaskbarController(HWND owner) : owner_(owner) {}
 
     bool Start() {
+        lastError_.clear();
         if (active_) {
             ScanWindows();
             return true;
@@ -411,12 +415,25 @@ public:
 
         ReadRegistryDword(L"TaskbarGlomLevel", &taskbarGlomLevel_);
         ReadRegistryDword(L"MMTaskbarGlomLevel", &multiMonitorGlomLevel_);
-        if (!WriteRegistryDword(L"TaskbarGlomLevel", 0) ||
-            !WriteRegistryDword(L"MMTaskbarGlomLevel", 0)) {
+        if (!WriteRegistryDword(L"TaskbarGlomLevel", 0)) {
+            lastError_ = L"Không thể ghi cài đặt TaskbarGlomLevel.";
+            return false;
+        }
+        if (!WriteRegistryDword(L"MMTaskbarGlomLevel", 0)) {
+            RestoreRegistryValue(taskbarGlomLevel_);
+            lastError_ = L"Không thể ghi cài đặt MMTaskbarGlomLevel.";
             return false;
         }
 
         active_ = true;
+        if (!InstallEventHook()) {
+            active_ = false;
+            RestoreRegistryValue(taskbarGlomLevel_);
+            RestoreRegistryValue(multiMonitorGlomLevel_);
+            NotifyTaskbarSettingsChanged();
+            lastError_ = L"Không thể đăng ký theo dõi sự kiện cửa sổ của Windows.";
+            return false;
+        }
         WriteStateFile(true);
         ScanWindows();
         NotifyTaskbarSettingsChanged();
@@ -432,6 +449,7 @@ public:
         }
 
         active_ = false;
+        UninstallEventHook();
         RestoreWindowProperties();
         RestoreRegistryValue(taskbarGlomLevel_);
         RestoreRegistryValue(multiMonitorGlomLevel_);
@@ -440,17 +458,64 @@ public:
         UpdateStatus();
     }
 
-    void Tick() {
-        if (active_) {
-            ScanWindows();
+    void HandleWindowEvent(DWORD event, HWND hwnd) {
+        if (!active_ || !hwnd) {
+            return;
         }
+
+        if (event == EVENT_OBJECT_DESTROY) {
+            states_.erase(hwnd);
+            UpdateStatus();
+            return;
+        }
+
+        if (event != EVENT_OBJECT_CREATE && event != EVENT_OBJECT_SHOW) {
+            return;
+        }
+
+        DWORD processId = 0;
+        std::wstring processPath;
+        if (IsEligibleWindow(hwnd, GetCurrentProcessId(), &processId,
+                             &processPath) &&
+            EnsureWindowIdentity(hwnd, processId, processPath)) {
+            NotifyTaskbarSettingsChanged();
+        }
+        UpdateStatus();
     }
 
     bool IsActive() const { return active_; }
     size_t TrackedWindowCount() const { return states_.size(); }
+    const std::wstring& LastError() const { return lastError_; }
 
 private:
     void UpdateStatus() const;
+
+    static void CALLBACK WinEventProc(HWINEVENTHOOK hook, DWORD event,
+                                      HWND hwnd, LONG idObject, LONG idChild,
+                                      DWORD eventThread, DWORD eventTime);
+
+    bool InstallEventHook() {
+        eventHook_ = SetWinEventHook(
+            EVENT_OBJECT_CREATE, EVENT_OBJECT_SHOW, nullptr,
+            &TaskbarController::WinEventProc, 0, 0,
+            WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
+        if (!eventHook_) {
+            return false;
+        }
+
+        g_activeController = this;
+        return true;
+    }
+
+    void UninstallEventHook() {
+        if (g_activeController == this) {
+            g_activeController = nullptr;
+        }
+        if (eventHook_) {
+            UnhookWinEvent(eventHook_);
+            eventHook_ = nullptr;
+        }
+    }
 
     void ScanWindows() {
         scanChanged_ = false;
@@ -487,8 +552,14 @@ private:
 
     bool EnsureWindowIdentity(HWND hwnd, DWORD processId,
                               const std::wstring& processPath) {
-        if (states_.find(hwnd) != states_.end()) {
-            return false;
+        const auto existing = states_.find(hwnd);
+        if (existing != states_.end()) {
+            DWORD currentProcessId = 0;
+            GetWindowThreadProcessId(hwnd, &currentProcessId);
+            if (IsWindow(hwnd) && currentProcessId == existing->second.processId) {
+                return false;
+            }
+            states_.erase(existing);
         }
 
         std::wstring currentId;
@@ -642,11 +713,30 @@ private:
 
     HWND owner_ = nullptr;
     bool active_ = false;
+    HWINEVENTHOOK eventHook_ = nullptr;
     RegistryValueState taskbarGlomLevel_{L"TaskbarGlomLevel"};
     RegistryValueState multiMonitorGlomLevel_{L"MMTaskbarGlomLevel"};
     std::unordered_map<HWND, WindowState> states_;
     bool scanChanged_ = false;
+    std::wstring lastError_;
 };
+
+void CALLBACK TaskbarController::WinEventProc(HWINEVENTHOOK, DWORD event,
+                                              HWND hwnd, LONG idObject,
+                                              LONG idChild, DWORD, DWORD) {
+    if (!g_activeController || !g_activeController->owner_ ||
+        idObject != OBJID_WINDOW || idChild != CHILDID_SELF || !hwnd) {
+        return;
+    }
+
+    if (event != EVENT_OBJECT_CREATE && event != EVENT_OBJECT_SHOW &&
+        event != EVENT_OBJECT_DESTROY) {
+        return;
+    }
+
+    PostMessageW(g_activeController->owner_, WM_WINDOW_EVENT,
+                 static_cast<WPARAM>(event), reinterpret_cast<LPARAM>(hwnd));
+}
 
 HFONT CreateUiFont(int height, int weight = FW_NORMAL) {
     return CreateFontW(height, 0, 0, 0, weight, FALSE, FALSE, FALSE,
@@ -693,7 +783,6 @@ public:
         controller_ = std::make_unique<TaskbarController>(window_);
         CreateControls();
         AddTrayIcon();
-        SetTimer(window_, TIMER_SCAN, 350, nullptr);
         controller_->Start();
         ShowWindow(window_, startHidden ? SW_HIDE : SW_SHOW);
         UpdateControls();
@@ -748,9 +837,11 @@ private:
                         break;
                 }
                 break;
-            case WM_TIMER:
-                if (wParam == TIMER_SCAN && controller_) {
-                    controller_->Tick();
+            case WM_WINDOW_EVENT:
+                if (controller_) {
+                    controller_->HandleWindowEvent(
+                        static_cast<DWORD>(wParam),
+                        reinterpret_cast<HWND>(lParam));
                     UpdateControls();
                 }
                 return 0;
@@ -896,7 +987,11 @@ private:
             return;
         }
 
-        if (controller_->IsActive()) {
+        if (!controller_->LastError().empty()) {
+            std::wstring text = L"Lỗi: " + controller_->LastError();
+            SetWindowTextW(status_, text.c_str());
+            EnableWindow(restore_, controller_->IsActive() ? TRUE : FALSE);
+        } else if (controller_->IsActive()) {
             std::wstring text = L"Đang hoạt động - đã tách " +
                                 std::to_wstring(controller_->TrackedWindowCount()) +
                                 L" cửa sổ";
@@ -932,9 +1027,8 @@ private:
 };
 
 void TaskbarController::UpdateStatus() const {
-    // The UI polls the controller after each timer tick. This method is kept as
-    // a hook for future status notifications without coupling the core logic to
-    // the window controls.
+    // The UI updates after each Windows window event. This method remains a
+    // hook for future status notifications without coupling core logic to UI.
 }
 
 }  // namespace
