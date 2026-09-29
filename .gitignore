@@ -1,0 +1,21 @@
+# Build and IDE output
+build/
+build-*/
+out/
+artifacts/
+.vs/
+.vscode/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+
+# Local automation state and logs
+.playwright-cli/
+*.log
+*.tmp
+
+# Published binaries are produced locally and are not committed to the source repo.
+*.exe
+*.dll
+*.pdb
